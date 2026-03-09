@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Presentation;
 
@@ -91,14 +92,21 @@ public static class PresentationExtractor
                 string shapeType = GetShapeType(shape);
 
                 string text = "";
+                string? formattedText = null;
                 if (textBody != null)
+                {
                     text = GetTextFromTextBody(textBody);
+                    formattedText = GetFormattedTextFromTextBody(textBody);
+                    // Only keep formatted version if it differs from plain text
+                    if (formattedText == text) formattedText = null;
+                }
 
                 slide.Shapes.Add(new ExtractedShape
                 {
                     Name = name,
                     Type = shapeType,
-                    Text = text
+                    Text = text,
+                    FormattedText = formattedText
                 });
             }
 
@@ -124,12 +132,15 @@ public static class PresentationExtractor
                     var name = nvSpPr?.NonVisualDrawingProperties?.Name?.Value ?? "";
                     var textBody = shape.TextBody;
                     string text = textBody != null ? GetTextFromTextBody(textBody) : "";
+                    string? fmtText = textBody != null ? GetFormattedTextFromTextBody(textBody) : null;
+                    if (fmtText == text) fmtText = null;
 
                     slide.Shapes.Add(new ExtractedShape
                     {
                         Name = name,
                         Type = "GroupedShape",
-                        Text = text
+                        Text = text,
+                        FormattedText = fmtText
                     });
                 }
             }
@@ -169,9 +180,108 @@ public static class PresentationExtractor
     private static string GetTextFromTextBody(OpenXmlCompositeElement textBody)
     {
         var paragraphs = textBody.Elements<A.Paragraph>();
-        return string.Join("\n", paragraphs.Select(p =>
-            string.Join("", p.Elements<A.Run>().Select(r => r.Text?.Text ?? ""))
-        ));
+        return string.Join("\n", paragraphs.Select(GetParagraphText));
+    }
+
+    /// <summary>
+    /// Extract text from a paragraph, including runs inside hyperlinks.
+    /// </summary>
+    private static string GetParagraphText(A.Paragraph para)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in para.ChildElements)
+        {
+            if (child is A.Run run)
+                sb.Append(GetFullRunText(run));
+            else if (child is A.Hyperlink link)
+            {
+                foreach (var linkRun in link.Elements<A.Run>())
+                    sb.Append(GetFullRunText(linkRun));
+            }
+            else if (child is A.Field field)
+            {
+                foreach (var fieldRun in field.Elements<A.Run>())
+                    sb.Append(GetFullRunText(fieldRun));
+                var fieldText = field.GetFirstChild<A.Text>();
+                if (fieldText != null)
+                    sb.Append(fieldText.Text);
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Extract text from a Drawing run, handling multiple Text elements
+    /// and Break elements within a single run.
+    /// </summary>
+    private static string GetFullRunText(A.Run run)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in run.ChildElements)
+        {
+            if (child is A.Text t)
+                sb.Append(t.Text);
+            else if (child is A.Break)
+                sb.Append('\n');
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Extract formatted text from a text body with inline formatting markers
+    /// for textconv output: [B], [I], [U], [S], [SUP], [SUB].
+    /// </summary>
+    public static string GetFormattedTextFromTextBody(OpenXmlCompositeElement textBody)
+    {
+        var paragraphs = textBody.Elements<A.Paragraph>();
+        return string.Join("\n", paragraphs.Select(GetFormattedParagraphText));
+    }
+
+    private static string GetFormattedParagraphText(A.Paragraph para)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in para.ChildElements)
+        {
+            if (child is A.Run run)
+                sb.Append(GetFormattedRunText(run));
+            else if (child is A.Hyperlink link)
+            {
+                foreach (var linkRun in link.Elements<A.Run>())
+                    sb.Append(GetFormattedRunText(linkRun));
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static string GetFormattedRunText(A.Run run)
+    {
+        string text = GetFullRunText(run);
+        if (string.IsNullOrEmpty(text)) return text;
+
+        var rPr = run.RunProperties;
+        if (rPr == null) return text;
+
+        // Drawing uses BooleanValue (implicit bool) not w:Val
+        if (rPr.Bold != null && (rPr.Bold.HasValue ? rPr.Bold.Value : true))
+            text = $"[B]{text}[/B]";
+        if (rPr.Italic != null && (rPr.Italic.HasValue ? rPr.Italic.Value : true))
+            text = $"[I]{text}[/I]";
+        if (rPr.Underline != null && rPr.Underline.HasValue
+            && rPr.Underline.Value != A.TextUnderlineValues.None)
+            text = $"[U]{text}[/U]";
+        if (rPr.Strike != null && rPr.Strike.HasValue
+            && rPr.Strike.Value != A.TextStrikeValues.NoStrike)
+            text = $"[S]{text}[/S]";
+
+        // Superscript / Subscript via Baseline percentage
+        if (rPr.Baseline != null)
+        {
+            int baseline = rPr.Baseline.Value;
+            if (baseline > 0) text = $"[SUP]{text}[/SUP]";
+            else if (baseline < 0) text = $"[SUB]{text}[/SUB]";
+        }
+
+        return text;
     }
 
     private static string GetSlideLayoutName(SlidePart slidePart)
@@ -203,10 +313,7 @@ public static class PresentationExtractor
                 var textBody = shape.TextBody;
                 if (textBody != null)
                 {
-                    var paragraphs = textBody.Elements<A.Paragraph>();
-                    string text = string.Join("\n", paragraphs.Select(p =>
-                        string.Join("", p.Elements<A.Run>().Select(r => r.Text?.Text ?? ""))
-                    ));
+                    string text = GetTextFromTextBody(textBody);
                     return string.IsNullOrWhiteSpace(text) ? null : text;
                 }
             }

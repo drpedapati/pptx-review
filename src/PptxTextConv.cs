@@ -63,8 +63,8 @@ public static class PptxTextConv
                 }
                 else
                 {
-                    // Normalize multiline text for display
-                    string text = shape.Text.Replace("\n", " ¶ ");
+                    // Use formatted text (with [B]/[I]/[U] markers) when available
+                    string text = (shape.FormattedText ?? shape.Text).Replace("\n", " ¶ ");
                     sb.AppendLine($"  {shape.Name}: \"{text}\"");
                 }
             }

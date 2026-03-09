@@ -1,9 +1,9 @@
 ---
 name: pptx-review
-description: "Read, edit, and diff PowerPoint presentations (.pptx) with text replacement, speaker notes, slide manipulation, comments, and semantic diffing using the pptx-review CLI v1.1.0 — a .NET 8 tool built on Microsoft's Open XML SDK. Ships as a single 14MB native binary (no runtime). Use when: (1) Replacing or setting text in existing slides, (2) Managing speaker notes on any slide, (3) Adding, deleting, duplicating, or reordering slides, (4) Adding comments to slides, (5) Reading/extracting slides, shapes, notes, comments, and metadata from a .pptx, (6) Diffing two .pptx files semantically, (7) Revising presentation content for review, (8) Any task requiring programmatic PowerPoint editing with formatting preservation that renders natively in PowerPoint."
+description: "Read, edit, and diff PowerPoint presentations (.pptx) with text replacement, speaker notes, slide manipulation, comments, and semantic diffing using the pptx-review CLI v1.2.0 — a .NET 8 tool built on Microsoft's Open XML SDK. Ships as a single 14MB native binary (no runtime). Use when: (1) Replacing or setting text in existing slides, (2) Managing speaker notes on any slide, (3) Adding, deleting, duplicating, or reordering slides, (4) Adding comments to slides, (5) Reading/extracting slides, shapes, notes, comments, and metadata from a .pptx, (6) Diffing two .pptx files semantically, (7) Revising presentation content for review, (8) Any task requiring programmatic PowerPoint editing with formatting preservation that renders natively in PowerPoint."
 ---
 
-# pptx-review v1.1.0
+# pptx-review v1.2.0
 
 CLI tool for PowerPoint presentation editing: text replacement, speaker notes, slide manipulation, comments, read, diff, and git integration. Built on Microsoft's Open XML SDK — 100% compatible with PowerPoint.
 
@@ -36,6 +36,7 @@ pptx-review input.pptx edits.json -o edited.pptx --json    # structured output
 pptx-review input.pptx edits.json --dry-run --json          # validate without modifying
 cat edits.json | pptx-review input.pptx -o edited.pptx      # stdin pipe
 pptx-review input.pptx edits.json -o edited.pptx --author "Dr. Smith"
+pptx-review input.pptx edits.json -i                                # edit in-place (rollback-safe)
 ```
 
 ### Read: Extract presentation content as JSON
@@ -99,7 +100,7 @@ Build this JSON, pass it to `pptx-review`.
 
 ### Critical rules for text matching
 
-1. **`find` text must match exactly** what appears in the presentation shape.
+1. **Must be exact copy-paste from the presentation.** The tool tries exact ordinal match first, then falls back to whitespace-flexible matching (treats any whitespace run including NBSP as equivalent).
 2. **Use `--read --json`** to see exact shape names and text content before editing.
 3. **Scope with `slide`** when the same text appears on multiple slides.
 4. **Shape names** (for `set_text`) come from the `name` field in read output (e.g., "Title 1", "Content Placeholder 2").
@@ -178,8 +179,10 @@ Exit code 0 = all succeeded. Exit code 1 = at least one failed (partial success 
 
 ## Key Behaviors
 
+- **Whitespace-flexible matching.** Exact ordinal match tried first; if that fails, falls back to a regex that normalizes whitespace runs (spaces, NBSP, tabs). Compiled regexes are cached.
 - **Formatting preserved.** RunProperties cloned from source runs onto replacement text.
-- **Multi-run text matching.** Text spanning multiple XML runs is found and handled correctly.
+- **Multi-run text matching.** Text spanning multiple XML runs (including breaks within runs) is found and handled correctly.
+- **In-place editing is rollback-safe.** Uses temp file + atomic move; original untouched on failure.
 - **Comments applied first**, then changes. Ensures slide structure is stable during comment insertion.
 - **Slide operations are order-sensitive.** Delete/reorder changes execute sequentially — plan slide numbers accordingly.
 - **Everything untouched is preserved.** Images, charts, animations, transitions, embedded objects, masters, and layouts survive intact.

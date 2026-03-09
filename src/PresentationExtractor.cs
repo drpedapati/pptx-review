@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Presentation;
 
@@ -170,8 +171,25 @@ public static class PresentationExtractor
     {
         var paragraphs = textBody.Elements<A.Paragraph>();
         return string.Join("\n", paragraphs.Select(p =>
-            string.Join("", p.Elements<A.Run>().Select(r => r.Text?.Text ?? ""))
+            string.Join("", p.Elements<A.Run>().Select(GetFullRunText))
         ));
+    }
+
+    /// <summary>
+    /// Extract text from a Drawing run, handling multiple Text elements
+    /// and Break elements within a single run.
+    /// </summary>
+    private static string GetFullRunText(A.Run run)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in run.ChildElements)
+        {
+            if (child is A.Text t)
+                sb.Append(t.Text);
+            else if (child is A.Break)
+                sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     private static string GetSlideLayoutName(SlidePart slidePart)
@@ -203,10 +221,7 @@ public static class PresentationExtractor
                 var textBody = shape.TextBody;
                 if (textBody != null)
                 {
-                    var paragraphs = textBody.Elements<A.Paragraph>();
-                    string text = string.Join("\n", paragraphs.Select(p =>
-                        string.Join("", p.Elements<A.Run>().Select(r => r.Text?.Text ?? ""))
-                    ));
+                    string text = GetTextFromTextBody(textBody);
                     return string.IsNullOrWhiteSpace(text) ? null : text;
                 }
             }

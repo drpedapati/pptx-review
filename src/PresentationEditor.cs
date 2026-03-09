@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Presentation;
@@ -20,6 +23,8 @@ namespace PptxReview;
 /// </summary>
 public class PresentationEditor
 {
+    private static readonly ConcurrentDictionary<string, Regex> _flexRegexCache = new();
+
     private readonly string _author;
     private readonly string _dateStr;
 
@@ -702,21 +707,22 @@ public class PresentationEditor
 
     /// <summary>
     /// Replace text within a Drawing paragraph, handling multi-run text spans.
+    /// Uses whitespace-flexible matching via FlexIndexOf.
     /// </summary>
     private int ReplaceTextInParagraph(A.Paragraph paragraph, string find, string replace)
     {
         var runs = paragraph.Elements<A.Run>().ToList();
         if (runs.Count == 0) return 0;
 
-        // Build concatenated text and run map
-        string fullText = string.Join("", runs.Select(r => r.Text?.Text ?? ""));
-        int idx = fullText.IndexOf(find, StringComparison.Ordinal);
-        if (idx < 0) return 0;
+        // Build concatenated text using GetFullRunText for multi-element runs
+        string fullText = string.Join("", runs.Select(GetFullRunText));
+        var flexMatch = FlexIndexOf(fullText, find);
+        if (flexMatch == null) return 0;
 
         int count = 0;
+        var (idx, matchLen, _) = flexMatch.Value;
 
-        // Simple case: replace all occurrences
-        // Rebuild runs after replacement
+        // Replace all occurrences
         while (idx >= 0)
         {
             count++;
@@ -725,24 +731,23 @@ public class PresentationEditor
             var runMap = new List<(A.Run run, int start, int end)>();
             foreach (var run in runs)
             {
-                string t = run.Text?.Text ?? "";
+                string t = GetFullRunText(run);
                 runMap.Add((run, charPos, charPos + t.Length));
                 charPos += t.Length;
             }
 
-            int matchEnd = idx + find.Length;
+            int matchEnd = idx + matchLen;
             var affected = runMap.Where(r => r.start < matchEnd && r.end > idx).ToList();
             if (affected.Count == 0) break;
 
             // Get formatting from first affected run
             var firstRun = affected[0].run;
-            var runProps = firstRun.RunProperties?.CloneNode(true) as A.RunProperties;
 
             // Calculate prefix and suffix
             string prefix = "";
             if (idx > affected[0].start)
             {
-                string t = affected[0].run.Text?.Text ?? "";
+                string t = GetFullRunText(affected[0].run);
                 prefix = t.Substring(0, idx - affected[0].start);
             }
 
@@ -750,7 +755,7 @@ public class PresentationEditor
             var lastAffected = affected[affected.Count - 1];
             if (matchEnd < lastAffected.end)
             {
-                string t = lastAffected.run.Text?.Text ?? "";
+                string t = GetFullRunText(lastAffected.run);
                 suffix = t.Substring(matchEnd - lastAffected.start);
             }
 
@@ -768,18 +773,20 @@ public class PresentationEditor
 
             // Recalculate for next occurrence, starting after the replacement to avoid infinite loops
             runs = paragraph.Elements<A.Run>().ToList();
-            fullText = string.Join("", runs.Select(r => r.Text?.Text ?? ""));
+            fullText = string.Join("", runs.Select(GetFullRunText));
             int searchFrom = idx + replace.Length;
-            idx = searchFrom < fullText.Length
-                ? fullText.IndexOf(find, searchFrom, StringComparison.Ordinal)
-                : -1;
+            if (searchFrom >= fullText.Length) break;
+            flexMatch = FlexIndexOf(fullText.Substring(searchFrom), find);
+            if (flexMatch == null) break;
+            idx = searchFrom + flexMatch.Value.index;
+            matchLen = flexMatch.Value.length;
         }
 
         return count;
     }
 
     /// <summary>
-    /// Check if text exists in a slide.
+    /// Check if text exists in a slide using whitespace-flexible matching.
     /// </summary>
     private bool FindTextInSlide(SlidePart slidePart, string find)
     {
@@ -792,7 +799,7 @@ public class PresentationEditor
             if (textBody == null) continue;
 
             string shapeText = GetTextFromTextBody(textBody);
-            if (shapeText.Contains(find, StringComparison.Ordinal))
+            if (FlexIndexOf(shapeText, find) != null)
                 return true;
         }
         return false;
@@ -1026,13 +1033,14 @@ public class PresentationEditor
     #region Helpers
 
     /// <summary>
-    /// Extract text from a TextBody element (works with both P.TextBody and A.TextBody).
+    /// Extract text from a TextBody element, handling multi-element runs
+    /// (runs containing Break or multiple Text elements).
     /// </summary>
-    private string GetTextFromTextBody(OpenXmlCompositeElement textBody)
+    private static string GetTextFromTextBody(OpenXmlCompositeElement textBody)
     {
         var paragraphs = textBody.Elements<A.Paragraph>();
         return string.Join("\n", paragraphs.Select(p =>
-            string.Join("", p.Elements<A.Run>().Select(r => r.Text?.Text ?? ""))
+            string.Join("", p.Elements<A.Run>().Select(GetFullRunText))
         ));
     }
 
@@ -1141,6 +1149,63 @@ public class PresentationEditor
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Find pattern in text using whitespace-flexible matching.
+    /// Tries exact ordinal match first (fast path). If that fails, treats
+    /// any whitespace run (including NBSP \u00a0) in the pattern as matching
+    /// any whitespace run in the text.
+    /// Returns (index, length, matchedText) or null.
+    /// </summary>
+    private static (int index, int length, string matchedText)? FlexIndexOf(string text, string pattern)
+    {
+        // Fast path: exact ordinal match
+        int exactIdx = text.IndexOf(pattern, StringComparison.Ordinal);
+        if (exactIdx >= 0)
+            return (exactIdx, pattern.Length, pattern);
+
+        // Split pattern into non-whitespace tokens.
+        var words = pattern.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0) return null;
+
+        var tokens = new List<string>();
+        foreach (var w in words)
+        {
+            var parts = w.Split('\u00a0', StringSplitOptions.RemoveEmptyEntries);
+            tokens.AddRange(parts);
+        }
+        if (tokens.Count == 0) return null;
+
+        // Build or retrieve cached regex: literal tokens separated by any whitespace run
+        var regex = _flexRegexCache.GetOrAdd(pattern, _ =>
+        {
+            var escaped = tokens.Select(Regex.Escape);
+            string flexPattern = string.Join(@"[\s\u00a0]+", escaped);
+            return new Regex(flexPattern, RegexOptions.Compiled);
+        });
+
+        var match = regex.Match(text);
+        if (!match.Success) return null;
+
+        return (match.Index, match.Length, match.Value);
+    }
+
+    /// <summary>
+    /// Extract text from a Drawing run, handling multiple Text elements
+    /// and Break elements within a single run.
+    /// </summary>
+    private static string GetFullRunText(A.Run run)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in run.ChildElements)
+        {
+            if (child is A.Text t)
+                sb.Append(t.Text);
+            else if (child is A.Break)
+                sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     private static string CreateTempCopy(string path)

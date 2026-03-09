@@ -15,6 +15,7 @@ class Program
         string? author = null;
         bool jsonOutput = false;
         bool dryRun = false;
+        bool inPlace = false;
         bool readMode = false;
         bool diffMode = false;
         bool textConvMode = false;
@@ -43,6 +44,10 @@ class Program
                     break;
                 case "--dry-run":
                     dryRun = true;
+                    break;
+                case "-i":
+                case "--in-place":
+                    inPlace = true;
                     break;
                 case "--read":
                     readMode = true;
@@ -209,8 +214,19 @@ class Program
             manifestJson = Console.In.ReadToEnd();
         }
 
+        // Validate --in-place vs --output
+        if (inPlace && outputPath != null)
+        {
+            Error("Cannot use --in-place (-i) with --output (-o). Choose one.");
+            return 1;
+        }
+
         // Default output path
-        if (outputPath == null && !dryRun)
+        if (inPlace && !dryRun)
+        {
+            outputPath = inputPath;
+        }
+        else if (outputPath == null && !dryRun)
         {
             string dir = Path.GetDirectoryName(inputPath) ?? ".";
             string name = Path.GetFileNameWithoutExtension(inputPath);
@@ -233,18 +249,34 @@ class Program
         // Resolve author (CLI flag > manifest > default)
         string effectiveAuthor = author ?? manifest.Author ?? "Reviewer";
 
-        // Process
+        // Process (in-place uses temp file + atomic move for rollback safety)
         var presentationEditor = new PresentationEditor(effectiveAuthor);
         ProcessingResult result;
+        string? tempPath = null;
 
         try
         {
-            result = presentationEditor.Process(inputPath, outputPath ?? "", manifest, dryRun);
+            if (inPlace && !dryRun)
+            {
+                tempPath = Path.Combine(Path.GetTempPath(), $"pptx-review-{Guid.NewGuid()}.pptx");
+                result = presentationEditor.Process(inputPath, tempPath, manifest, dryRun);
+                if (result.Success)
+                    File.Move(tempPath, inputPath!, true);
+            }
+            else
+            {
+                result = presentationEditor.Process(inputPath, outputPath ?? "", manifest, dryRun);
+            }
         }
         catch (Exception ex)
         {
             Error($"Processing failed: {ex.Message}");
             return 1;
+        }
+        finally
+        {
+            if (tempPath != null && File.Exists(tempPath))
+                try { File.Delete(tempPath); } catch { }
         }
 
         // Output
@@ -281,6 +313,7 @@ Diff & Git Integration:
 Read/Write Options:
   --read                 Read mode: extract slides, shapes, notes, comments
   -o, --output <path>    Output file path (default: <input>_edited.pptx)
+  -i, --in-place         Edit input file directly (mutually exclusive with -o)
   --author <name>        Author name (overrides manifest author)
   --json                 Output results as JSON
   --dry-run              Validate manifest without modifying

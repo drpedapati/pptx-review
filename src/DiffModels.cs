@@ -245,6 +245,13 @@ public class ExtractedShape
     public string Name { get; set; } = "";
     public string Type { get; set; } = "";
     public string Text { get; set; } = "";
+
+    /// <summary>
+    /// Text with inline formatting markers ([B], [I], [U], [S], [SUP], [SUB]).
+    /// Used by textconv for richer git diffs. Null if no formatting present.
+    /// </summary>
+    [JsonIgnore]
+    public string? FormattedText { get; set; }
 }
 
 public class ExtractedImage

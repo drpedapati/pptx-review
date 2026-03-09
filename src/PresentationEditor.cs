@@ -203,16 +203,17 @@ public class PresentationEditor
                 }
             }
 
-            presentationPart.Presentation.Save();
+            result.Success = result.ChangesSucceeded == result.ChangesAttempted
+                          && result.CommentsSucceeded == result.CommentsAttempted;
+
+            if (!dryRun)
+                presentationPart.Presentation.Save();
         }
         finally
         {
             if (dryRun && File.Exists(workPath))
                 File.Delete(workPath);
         }
-
-        result.Success = result.ChangesSucceeded == result.ChangesAttempted
-                      && result.CommentsSucceeded == result.CommentsAttempted;
 
         return result;
     }
@@ -708,10 +709,11 @@ public class PresentationEditor
     /// <summary>
     /// Replace text within a Drawing paragraph, handling multi-run text spans.
     /// Uses whitespace-flexible matching via FlexIndexOf.
+    /// Collects runs from both direct children and hyperlink wrappers.
     /// </summary>
     private int ReplaceTextInParagraph(A.Paragraph paragraph, string find, string replace)
     {
-        var runs = paragraph.Elements<A.Run>().ToList();
+        var runs = CollectAllRuns(paragraph);
         if (runs.Count == 0) return 0;
 
         // Build concatenated text using GetFullRunText for multi-element runs
@@ -772,7 +774,7 @@ public class PresentationEditor
                 affected[i].run.Remove();
 
             // Recalculate for next occurrence, starting after the replacement to avoid infinite loops
-            runs = paragraph.Elements<A.Run>().ToList();
+            runs = CollectAllRuns(paragraph);
             fullText = string.Join("", runs.Select(GetFullRunText));
             int searchFrom = idx + replace.Length;
             if (searchFrom >= fullText.Length) break;
@@ -1034,14 +1036,39 @@ public class PresentationEditor
 
     /// <summary>
     /// Extract text from a TextBody element, handling multi-element runs
-    /// (runs containing Break or multiple Text elements).
+    /// (runs containing Break or multiple Text elements) and hyperlinks.
     /// </summary>
     private static string GetTextFromTextBody(OpenXmlCompositeElement textBody)
     {
         var paragraphs = textBody.Elements<A.Paragraph>();
-        return string.Join("\n", paragraphs.Select(p =>
-            string.Join("", p.Elements<A.Run>().Select(GetFullRunText))
-        ));
+        return string.Join("\n", paragraphs.Select(GetParagraphText));
+    }
+
+    /// <summary>
+    /// Extract text from a paragraph, including runs inside hyperlinks and fields.
+    /// </summary>
+    private static string GetParagraphText(A.Paragraph para)
+    {
+        var sb = new StringBuilder();
+        foreach (var child in para.ChildElements)
+        {
+            if (child is A.Run run)
+                sb.Append(GetFullRunText(run));
+            else if (child is A.Hyperlink link)
+            {
+                foreach (var linkRun in link.Elements<A.Run>())
+                    sb.Append(GetFullRunText(linkRun));
+            }
+            else if (child is A.Field field)
+            {
+                foreach (var fieldRun in field.Elements<A.Run>())
+                    sb.Append(GetFullRunText(fieldRun));
+                var fieldText = field.GetFirstChild<A.Text>();
+                if (fieldText != null)
+                    sb.Append(fieldText.Text);
+            }
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1149,6 +1176,25 @@ public class PresentationEditor
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Collect all A.Run elements from a paragraph, including those nested
+    /// inside A.Hyperlink and A.Field wrappers.
+    /// </summary>
+    private static List<A.Run> CollectAllRuns(A.Paragraph para)
+    {
+        var runs = new List<A.Run>();
+        foreach (var child in para.ChildElements)
+        {
+            if (child is A.Run run)
+                runs.Add(run);
+            else if (child is A.Hyperlink link)
+                runs.AddRange(link.Elements<A.Run>());
+            else if (child is A.Field field)
+                runs.AddRange(field.Elements<A.Run>());
+        }
+        return runs;
     }
 
     /// <summary>

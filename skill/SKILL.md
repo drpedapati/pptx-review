@@ -181,7 +181,8 @@ Exit code 0 = all succeeded. Exit code 1 = at least one failed (partial success 
 
 - **Whitespace-flexible matching.** Exact ordinal match tried first; if that fails, falls back to a regex that normalizes whitespace runs (spaces, NBSP, tabs). Compiled regexes are cached.
 - **Formatting preserved.** RunProperties cloned from source runs onto replacement text.
-- **Multi-run text matching.** Text spanning multiple XML runs (including breaks within runs) is found and handled correctly.
+- **Multi-run text matching.** Text spanning multiple XML runs (including breaks within runs) is found and handled correctly. Hyperlink and field text is also extracted.
+- **Textconv formatting markers.** `--textconv` output includes `[B]`/`[I]`/`[U]`/`[S]`/`[SUP]`/`[SUB]` inline markers for richer git diffs when formatting changes.
 - **In-place editing is rollback-safe.** Uses temp file + atomic move; original untouched on failure.
 - **Comments applied first**, then changes. Ensures slide structure is stable during comment insertion.
 - **Slide operations are order-sensitive.** Delete/reorder changes execute sequentially — plan slide numbers accordingly.
